@@ -1,7 +1,10 @@
 import requests
 import platform
 import subprocess
+import psutil
+import time
 from getpass import getpass
+from datetime import datetime
 
 # VARIAVEIS:
 IP_API = "localhost"
@@ -178,6 +181,11 @@ def cadastrar_maquina():
                     global modelo_nome
                     modelo_nome = resposta.get("nome")
 
+                    print("Iniciando cadastro dos parâmetros de máquina...")
+                    cadastrar_parametros(1)
+                    cadastrar_parametros(2)
+                    cadastrar_parametros(3)
+                    cadastrar_parametros(4)
                     print("Máquina cadastrada com sucesso!")
                     return coletar_dados()
                     
@@ -197,8 +205,128 @@ def cadastrar_maquina():
         print("Erro: O servidor demorou muito para responder")
     return renderizar_index()
 
+def cadastrar_parametros(fk_componente):
+    atual = fk_componente
+    componentes = {
+        1: "CPU",
+        2: "RAM",
+        3: "Disco",
+        4: "Rede"
+    }
+
+    confirmar = input(f"Deseja monitorar {componentes[fk_componente]}? (s/n)")
+    if (confirmar == "s"):
+        valor_maximo = input("Insira o valor máximo de leitura (Ex. 00.00):")
+        valor_minimo = input("Insira o valor mínimo de leitura (Ex. 00.00):")
+
+        print(f"Confirme os dados sobre monitoramento de {componentes[fk_componente]}")
+        print(f"Monitorar {componentes[fk_componente]}? Sim | Valor máximo de leitura: {valor_maximo} | Valor mínimo de leitura: {valor_minimo}")
+        confirmar_dados = input("Confirmar? (s/n) ")
+        if (confirmar_dados == "s"):
+            url = f"http://{IP_API}:{PORTA_API}/radares/cadastrarParametro"
+            dados = {
+                "fk_componenteServer": fk_componente,
+                "fk_radarServer": id_radar,
+                "valor_maximoServer": valor_maximo,
+                "valor_minimoServer": valor_minimo
+            }
+
+            try:
+                fetch = requests.post(url, json=dados, timeout=10)
+                if fetch.ok:
+                    print(f"Parametro de {componentes[fk_componente]} cadastrado com sucesso!")
+                    return True
+                else:
+                    print(f"Erro: Falha ao se comunicar com o servidor")
+                    print(f"Tentando novamente...")
+                    return cadastrar_parametros(atual)
+
+            except requests.exceptions.Timeout:
+                print("Erro: O servidor demorou muito para responder")
+            return renderizar_index()
+        else:
+            print(f"Tentando novamente...")
+            return cadastrar_parametros(atual)
+
+    else:
+        return False    
+        
 def coletar_dados():
-    print("Monitoramento ainda não implementado.")
-    return True
+    print("Iniciando processo de monitoramento")
+
+    url = f"http://{IP_API}:{PORTA_API}/radares/buscarParametros/{id_radar}"
+    
+    try:
+        fetch = requests.get(url, timeout=10)
+    
+        if fetch.ok:
+            resposta = fetch.json()
+                
+            print(resposta)
+
+            alvo_cpu = None
+            alvo_ram = None
+            alvo_disco = None
+            alvo_rede = None
+
+            if (len(resposta) == 0):
+                confirmar = input("Não foram definidos parâmetros... Deseja configurar agora? (s/n) ")
+                if (confirmar == 's'):
+                    print("Iniciando configuração dos parâmetros de máquina...")
+                    cadastrar_parametros(1)
+                    cadastrar_parametros(2)
+                    cadastrar_parametros(3)
+                    cadastrar_parametros(4)
+                    print("Todos os parametros foram configurados!")
+                else:
+                    print("Você pode solicitar ao seu gestor para que defina os parâmetros pela dashboard")
+                    print("Abortando...")
+                    renderizar_index()
+
+            for item in resposta:
+                if item["nome"] == "cpu":
+                    alvo_cpu = True
+                if item["nome"] == "ram":
+                    alvo_ram = True
+                if item["nome"] == "disco":
+                    alvo_disco = True
+                if item["nome"] == "rede":
+                    alvo_rede = True
+
+            print("Iniciando captura de dados:")
+            for i in range(25):
+                cpu = psutil.cpu_percent(interval=1) if alvo_cpu else None
+                ram = psutil.virtual_memory().percent if alvo_ram else None
+                disco = psutil.disk_usage("/").percent if alvo_disco else None
+
+                if alvo_rede == True:
+                    rede_inicio = psutil.net_io_counters() 
+                    time.sleep(10)
+                    rede_fim = psutil.net_io_counters()
+                    upload_mbps = f"{(rede_fim.bytes_sent - rede_inicio.bytes_sent) * 8 / 1_000_000:.3f}"
+                else:
+                    upload_mbps = None
+
+                data_hora = datetime.now().replace(microsecond=0)
+                time.sleep(4)
+                if alvo_cpu: print(f"CPU: {cpu}%")
+                if alvo_ram: print(f"Memória: {ram}%")
+                if alvo_disco: print(f"Disco: {disco}%")
+                if alvo_rede: print(f"Rede: {upload_mbps} Mbps")
+                print("Data e hora local:", data_hora)
+                print("---------------------------------------------")
+            print("Programa encerrado.")
+            
+            print("Máquina validada!")
+            return True
+        
+        else:
+            print(f"Erro: Falha ao se comunicar com o servidor")
+            print(f"Tentando novamente...")
+            return coletar_dados()
+    
+    except requests.exceptions.Timeout:
+        print("Erro: O servidor demorou muito para responder")
+    return renderizar_index() 
 
 renderizar_index()
