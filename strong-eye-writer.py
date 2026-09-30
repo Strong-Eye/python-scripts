@@ -3,6 +3,7 @@ import platform
 import subprocess
 import psutil
 import time
+from pathlib import Path
 from getpass import getpass
 from datetime import datetime
 
@@ -294,6 +295,13 @@ def coletar_dados():
                     alvo_rede = True
 
             print("Iniciando captura de dados:")
+            data_atual = datetime.now().strftime("%Y-%m-%d")
+            nome_arquivo = f"./{modelo_nome}_{uuid}_{data_atual}.csv"
+
+            if not Path(f"./{nome_arquivo}").exists():
+                with open(f'./{nome_arquivo}', 'a', newline='') as csvfile:
+                    csvfile.write("maquina, uuid, cpu, disco, memoria, rede, data/hora\n")
+
             for i in range(25):
                 cpu = psutil.cpu_percent(interval=1) if alvo_cpu else None
                 ram = psutil.virtual_memory().percent if alvo_ram else None
@@ -308,6 +316,8 @@ def coletar_dados():
                     upload_mbps = None
 
                 data_hora = datetime.now().replace(microsecond=0)
+                with open(f'./{nome_arquivo}', 'a', newline='') as csvfile:
+                    csvfile.write(f"{modelo_nome}, {uuid}, {cpu}, {ram}, {disco}, {upload_mbps}, {data_hora}\n")
                 time.sleep(4)
                 if alvo_cpu: print(f"CPU: {cpu}%")
                 if alvo_ram: print(f"Memória: {ram}%")
