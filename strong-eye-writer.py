@@ -3,13 +3,16 @@ import platform
 import subprocess
 import psutil
 import time
+import os
 from pathlib import Path
 from getpass import getpass
 from datetime import datetime
+from dotenv import load_dotenv
 
 # VARIAVEIS:
-IP_API = "localhost"
-PORTA_API = 3333
+load_dotenv()
+ip_backend = os.getenv("IP_API")
+porta_backend = os.getenv("PORTA_API")
 
 id_usuario = None
 nome_usuario = None
@@ -33,7 +36,7 @@ def obter_uuid_da_placa():
         return None
 
 def login():
-    url = f"http://{IP_API}:{PORTA_API}/usuarios/autenticar"
+    url = f"http://{ip_backend}:{porta_backend}/usuarios/autenticar"
     email = input("Email: ")
     senha = getpass("Senha: ")
     dados = {
@@ -88,7 +91,7 @@ def renderizar_index():
 def validando_maquina():
     global uuid
     uuid = obter_uuid_da_placa()
-    url = f"http://{IP_API}:{PORTA_API}/radares/buscarPorUuid/{uuid}"
+    url = f"http://{ip_backend}:{porta_backend}/radares/buscarPorUuid/{uuid}"
 
     try:
         fetch = requests.get(url, params={"fkEmpresaUsuario": id_empresa}, timeout=10)
@@ -156,7 +159,7 @@ def cadastrar_maquina():
         confirmar_cadastro = input("Confirmar cadastro? (s/n)")
         if (confirmar_cadastro == "s"):
 
-            url = f"http://{IP_API}:{PORTA_API}/radares/cadastrar"
+            url = f"http://{ip_backend}:{porta_backend}/radares/cadastrar"
             dados = {
                 "uuidServer": uuid,
                 "modeloServer": modelo,
@@ -224,7 +227,7 @@ def cadastrar_parametros(fk_componente):
         print(f"Monitorar {componentes[fk_componente]}? Sim | Valor máximo de leitura: {valor_maximo} | Valor mínimo de leitura: {valor_minimo}")
         confirmar_dados = input("Confirmar? (s/n) ")
         if (confirmar_dados == "s"):
-            url = f"http://{IP_API}:{PORTA_API}/radares/cadastrarParametro"
+            url = f"http://{ip_backend}:{porta_backend}/radares/cadastrarParametro"
             dados = {
                 "fk_componenteServer": fk_componente,
                 "fk_radarServer": id_radar,
@@ -255,7 +258,7 @@ def cadastrar_parametros(fk_componente):
 def coletar_dados():
     print("Iniciando processo de monitoramento")
 
-    url = f"http://{IP_API}:{PORTA_API}/radares/buscarParametros/{id_radar}"
+    url = f"http://{ip_backend}:{porta_backend}/radares/buscarParametros/{id_radar}"
     
     try:
         fetch = requests.get(url, timeout=10)
