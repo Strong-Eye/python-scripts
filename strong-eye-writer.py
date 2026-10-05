@@ -4,6 +4,7 @@ import subprocess
 import psutil
 import time
 import os
+import boto3
 from pathlib import Path
 from getpass import getpass
 from datetime import datetime
@@ -11,8 +12,11 @@ from dotenv import load_dotenv
 
 # VARIAVEIS:
 load_dotenv()
-ip_backend = os.getenv("IP_API")
-porta_backend = os.getenv("PORTA_API")
+ip_api = os.getenv("IP_API")
+porta_api = os.getenv("PORTA_API")
+session = os.getenv("SESSION_AWS")
+bucket_name = os.getenv("BUCKET_NAME")
+s3_client = boto3.client("s3")
 
 id_usuario = None
 nome_usuario = None
@@ -21,6 +25,9 @@ uuid = None
 id_radar = None
 maquina = None
 modelo_nome = None
+
+contador_coletas = 0
+contador_lote = 1
 
 def obter_uuid_da_placa():
     sistema = platform.system().lower()
@@ -36,7 +43,7 @@ def obter_uuid_da_placa():
         return None
 
 def login():
-    url = f"http://{ip_backend}:{porta_backend}/usuarios/autenticar"
+    url = f"http://{ip_api}:{porta_api}/usuarios/autenticar"
     email = input("Email: ")
     senha = getpass("Senha: ")
     dados = {
@@ -83,6 +90,7 @@ def renderizar_index():
 ║    -  Faça login com sua conta empresarial;                                         ║
 ║    -  Valide esta máquina;                                                          ║
 ║    -  Caso necessário, realize o cadastro da mesma;                                 ║
+║       -   Defina Parâmetros de coleta;                                              ║
 ║    -  Inicie o monitoramento.                                                       ║
 ║                                                                                     ║
 ╚═════════════════════════════════════════════════════════════════════════════════════╝""")
@@ -91,7 +99,7 @@ def renderizar_index():
 def validando_maquina():
     global uuid
     uuid = obter_uuid_da_placa()
-    url = f"http://{ip_backend}:{porta_backend}/radares/buscarPorUuid/{uuid}"
+    url = f"http://{ip_api}:{porta_api}/radares/buscarPorUuid/{uuid}"
 
     try:
         fetch = requests.get(url, params={"fkEmpresaUsuario": id_empresa}, timeout=10)
@@ -159,7 +167,7 @@ def cadastrar_maquina():
         confirmar_cadastro = input("Confirmar cadastro? (s/n)")
         if (confirmar_cadastro == "s"):
 
-            url = f"http://{ip_backend}:{porta_backend}/radares/cadastrar"
+            url = f"http://{ip_api}:{porta_api}/radares/cadastrar"
             dados = {
                 "uuidServer": uuid,
                 "modeloServer": modelo,
@@ -227,7 +235,7 @@ def cadastrar_parametros(fk_componente):
         print(f"Monitorar {componentes[fk_componente]}? Sim | Valor máximo de leitura: {valor_maximo} | Valor mínimo de leitura: {valor_minimo}")
         confirmar_dados = input("Confirmar? (s/n) ")
         if (confirmar_dados == "s"):
-            url = f"http://{ip_backend}:{porta_backend}/radares/cadastrarParametro"
+            url = f"http://{ip_api}:{porta_api}/radares/cadastrarParametro"
             dados = {
                 "fk_componenteServer": fk_componente,
                 "fk_radarServer": id_radar,
@@ -255,10 +263,23 @@ def cadastrar_parametros(fk_componente):
     else:
         return False    
         
+def gerar_nomes_arquivo(contador_lote):
+    data_hoje = datetime.now().strftime("%m-%d-%Y")
+    nome_local = f"{modelo_nome}_{data_hoje}_READ-{contador_lote}.csv"
+    chave_s3 = f"raw/{nome_local}"
+    return nome_local, chave_s3
+
+def enviar_arquivo(nome_arquivo, chave_s3):
+    try:
+        s3_client.upload_file(nome_arquivo, bucket_name, chave_s3)
+        print(f"Sincronizado no S3: s3://{bucket_name}/{chave_s3}")
+    except Exception as e:
+        print(f"Erro ao enviar para o S3: {e}")
+        
 def coletar_dados():
     print("Iniciando processo de monitoramento")
 
-    url = f"http://{ip_backend}:{porta_backend}/radares/buscarParametros/{id_radar}"
+    url = f"http://{ip_api}:{porta_api}/radares/buscarParametros/{id_radar}"
     
     try:
         fetch = requests.get(url, timeout=10)
@@ -298,36 +319,55 @@ def coletar_dados():
                     alvo_rede = True
 
             print("Iniciando captura de dados:")
-            data_atual = datetime.now().strftime("%Y-%m-%d")
-            nome_arquivo = f"./{modelo_nome}_{uuid}_{data_atual}.csv"
 
-            if not Path(f"./{nome_arquivo}").exists():
-                with open(f'./{nome_arquivo}', 'a', newline='') as csvfile:
-                    csvfile.write("maquina, uuid, cpu, disco, memoria, rede, data/hora\n")
+            try:
+                while True:
+                    global contador_lote
+                    nome_arquivo, chave_s3 = gerar_nomes_arquivo(contador_lote)
+                    
+                    if not Path(f"./{nome_arquivo}").exists():
+                        with open(f'./{nome_arquivo}', 'a', newline='') as csvfile:
+                            csvfile.write("maquina,uuid,cpu,ram,desco,rede,total_processos,data/hora\n")
+                    
+                    cpu = psutil.cpu_percent(interval=1) if alvo_cpu else None
+                    ram = psutil.virtual_memory().percent if alvo_ram else None
+                    disco = psutil.disk_usage("/").percent if alvo_disco else None
+                    total_processos = len(psutil.pids())
 
-            for i in range(25):
-                cpu = psutil.cpu_percent(interval=1) if alvo_cpu else None
-                ram = psutil.virtual_memory().percent if alvo_ram else None
-                disco = psutil.disk_usage("/").percent if alvo_disco else None
+                    if alvo_rede == True:
+                        rede_inicio = psutil.net_io_counters() 
+                        time.sleep(10)
+                        rede_fim = psutil.net_io_counters()
+                        upload_mbps = f"{(rede_fim.bytes_sent - rede_inicio.bytes_sent) * 8 / 1_000_000:.3f}"
+                    else:
+                        upload_mbps = None
 
-                if alvo_rede == True:
-                    rede_inicio = psutil.net_io_counters() 
-                    time.sleep(10)
-                    rede_fim = psutil.net_io_counters()
-                    upload_mbps = f"{(rede_fim.bytes_sent - rede_inicio.bytes_sent) * 8 / 1_000_000:.3f}"
-                else:
-                    upload_mbps = None
-
-                data_hora = datetime.now().replace(microsecond=0)
-                with open(f'./{nome_arquivo}', 'a', newline='') as csvfile:
-                    csvfile.write(f"{modelo_nome}, {uuid}, {cpu}, {ram}, {disco}, {upload_mbps}, {data_hora}\n")
-                time.sleep(4)
-                if alvo_cpu: print(f"CPU: {cpu}%")
-                if alvo_ram: print(f"Memória: {ram}%")
-                if alvo_disco: print(f"Disco: {disco}%")
-                if alvo_rede: print(f"Rede: {upload_mbps} Mbps")
-                print("Data e hora local:", data_hora)
-                print("---------------------------------------------")
+                    data_hora = datetime.now().replace(microsecond=0)                    
+                    
+                    with open(f'./{nome_arquivo}', 'a', newline='') as csvfile:
+                        csvfile.write(f"{modelo_nome},{uuid},{cpu},{ram},{disco},{upload_mbps},{total_processos},{data_hora}\n")
+                    
+                    global contador_coletas
+                    contador_coletas += 1
+                    
+                    if alvo_cpu: print(f"CPU: {cpu}%")
+                    if alvo_ram: print(f"Memória: {ram}%")
+                    if alvo_disco: print(f"Disco: {disco}%")
+                    if alvo_rede: print(f"Rede: {upload_mbps} Mbps")
+                    
+                    print("Data e hora local:", data_hora)
+                    print("---------------------------------------------")
+                    
+                    if (contador_coletas == 3):
+                        enviar_arquivo(nome_arquivo, chave_s3)
+                        contador_coletas = 0
+                        contador_lote += 1
+                    
+                    time.sleep(5)
+                    
+            except KeyboardInterrupt:
+                print("Programa encerrado de forma abrupta")
+                
             print("Programa encerrado.")
             
             print("Máquina validada!")
