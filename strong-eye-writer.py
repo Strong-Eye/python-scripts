@@ -342,7 +342,44 @@ def coletar_dados():
                     else:
                         upload_mbps = None
 
-                    data_hora = datetime.now().replace(microsecond=0)                    
+                    data_hora = datetime.now().replace(microsecond=0)
+                    
+                    # Aplicando a regra de negócio
+                    hora_atual = data_hora.hour
+                    if hora_atual < 4:
+                        cpu = cpu * 1.1
+                        ram = ram * 1.1
+                        disco = ram * 1.1
+                        
+                    if hora_atual < 6:
+                        cpu = cpu * 1.2
+                        ram = ram * 1.2
+                        disco = ram * 1.2
+                        
+                    if hora_atual < 9:
+                        cpu = cpu * 1.3
+                        ram = ram * 1.3
+                        disco = ram * 1.3
+                        
+                    if hora_atual < 16:
+                        cpu = cpu * 1.1
+                        ram = ram * 1.1
+                        disco = ram * 1.1
+                        
+                    if hora_atual < 18:
+                        cpu = cpu * 1.2
+                        ram = ram * 1.2
+                        disco = ram * 1.2
+                        
+                    if hora_atual < 21:
+                        cpu = cpu * 1.3
+                        ram = ram * 1.3
+                        disco = ram * 1.3
+                        
+                    if hora_atual < 23:
+                        cpu = cpu * 1.1
+                        ram = ram * 1.1
+                        disco = ram * 1.1                        
                     
                     with open(f'./{nome_arquivo}', 'a', newline='') as csvfile:
                         csvfile.write(f"{modelo_nome},{uuid},{cpu},{ram},{disco},{upload_mbps},{total_processos},{data_hora}\n")
