@@ -2,3 +2,8 @@
 *.csv
 .env
 teste*
+01-bronze
+02-silver
+03-gold
+*2*
+leitura.py

@@ -5,6 +5,7 @@ import psutil
 import time
 import os
 import boto3
+import random
 from pathlib import Path
 from getpass import getpass
 from datetime import datetime
@@ -28,6 +29,14 @@ modelo_nome = None
 
 contador_coletas = 0
 contador_lote = 1
+
+def cara_ou_coroa(numero_tentativas):
+    for i in range(numero_tentativas):
+        if random.randint(0, 1) == 0:
+            continue
+        else:
+            return False
+    return True
 
 def obter_uuid_da_placa():
     sistema = platform.system().lower()
@@ -99,7 +108,7 @@ def renderizar_index():
 def validando_maquina():
     global uuid
     uuid = obter_uuid_da_placa()
-    url = f"http://{ip_api}:{porta_api}/radares/buscarPorUuid/{uuid}"
+    url = f"http://{ip_api}:{porta_api}/radar/buscarPorUuid/{uuid}"
 
     try:
         fetch = requests.get(url, params={"fkEmpresaUsuario": id_empresa}, timeout=10)
@@ -167,7 +176,7 @@ def cadastrar_maquina():
         confirmar_cadastro = input("Confirmar cadastro? (s/n)")
         if (confirmar_cadastro == "s"):
 
-            url = f"http://{ip_api}:{porta_api}/radares/cadastrar"
+            url = f"http://{ip_api}:{porta_api}/radar/cadastrar"
             dados = {
                 "uuidServer": uuid,
                 "modeloServer": modelo,
@@ -235,7 +244,7 @@ def cadastrar_parametros(fk_componente):
         print(f"Monitorar {componentes[fk_componente]}? Sim | Valor máximo de leitura: {valor_maximo} | Valor mínimo de leitura: {valor_minimo}")
         confirmar_dados = input("Confirmar? (s/n) ")
         if (confirmar_dados == "s"):
-            url = f"http://{ip_api}:{porta_api}/radares/cadastrarParametro"
+            url = f"http://{ip_api}:{porta_api}/radar/cadastrarParametro"
             dados = {
                 "fk_componenteServer": fk_componente,
                 "fk_radarServer": id_radar,
@@ -279,7 +288,7 @@ def enviar_arquivo(nome_arquivo, chave_s3):
 def coletar_dados():
     print("Iniciando processo de monitoramento")
 
-    url = f"http://{ip_api}:{porta_api}/radares/buscarParametros/{id_radar}"
+    url = f"http://{ip_api}:{porta_api}/radar/buscarParametros/{id_radar}"
     
     try:
         fetch = requests.get(url, timeout=10)
@@ -336,7 +345,7 @@ def coletar_dados():
 
                     if alvo_rede == True:
                         rede_inicio = psutil.net_io_counters() 
-                        time.sleep(10)
+                        time.sleep(1)
                         rede_fim = psutil.net_io_counters()
                         upload_mbps = f"{(rede_fim.bytes_sent - rede_inicio.bytes_sent) * 8 / 1_000_000:.3f}"
                     else:
@@ -346,40 +355,85 @@ def coletar_dados():
                     
                     # Aplicando a regra de negócio
                     hora_atual = data_hora.hour
-                    if hora_atual < 4:
-                        cpu = cpu * 1.1
-                        ram = ram * 1.1
-                        disco = ram * 1.1
+                    is_comum = cara_ou_coroa(2) # 25% de chande de passar carro
+                    is_inicio_pico = cara_ou_coroa(1) # 50% de chance de passar carro
+                    is_pico = True
+                    is_multa = cara_ou_coroa(3) # 12,5% de chance de chance de tomar multa
                         
-                    if hora_atual < 6:
-                        cpu = cpu * 1.2
-                        ram = ram * 1.2
-                        disco = ram * 1.2
+                    
+                    def nova_leitura(leitura_atual, horario_de_pico=False): 
+                        resposta = None
+                        limite = 100 
+                        folga = limite - leitura_atual 
+                        contador_tentativas = 0
+
+                        while not resposta:
+                            if horario_de_pico:
+                                incremento = random.randint(40, 50)
+                            else:
+                                incremento = random.randint(10, 30)
+                            if leitura_atual >= 80:
+                                incremento = random.randint(1, 20)
+                                
+                            if incremento <= folga:
+                                resposta = leitura_atual + incremento
+                            contador_tentativas += 1
+                            ''
+                            if contador_tentativas == 5:
+                                resposta = leitura_atual
+                            print(f"Tentativa de leitura {contador_tentativas}: {leitura_atual + incremento}%")
+
+                        return resposta
+
+                    
+                    
+                    
+                    if hora_atual < 4 and ram is not None and cpu is not None and disco is not None:
+                        if is_comum:
+                            cpu = nova_leitura(cpu)
+                            ram = nova_leitura(ram)
+                            if is_multa:
+                                disco = nova_leitura(disco)
                         
-                    if hora_atual < 9:
-                        cpu = cpu * 1.3
-                        ram = ram * 1.3
-                        disco = ram * 1.3
+                    if hora_atual < 6 and ram is not None and cpu is not None and disco is not None:
+                        if is_inicio_pico:
+                            cpu = nova_leitura(cpu)
+                            ram = nova_leitura(ram)
+                            if is_multa:
+                                disco = nova_leitura(disco)
                         
-                    if hora_atual < 16:
-                        cpu = cpu * 1.1
-                        ram = ram * 1.1
-                        disco = ram * 1.1
+                    if hora_atual < 9 and ram is not None and cpu is not None and disco is not None:
+                        ram = nova_leitura(ram, True)
+                        cpu = nova_leitura(cpu, True)
+                        if is_multa:
+                            disco = nova_leitura(disco, True)
                         
-                    if hora_atual < 18:
-                        cpu = cpu * 1.2
-                        ram = ram * 1.2
-                        disco = ram * 1.2
+                    if hora_atual < 16 and ram is not None and cpu is not None and disco is not None:
+                        if is_comum:
+                            cpu = nova_leitura(cpu)
+                            ram = nova_leitura(ram)
+                            if is_multa:
+                                disco = nova_leitura(disco)
                         
-                    if hora_atual < 21:
-                        cpu = cpu * 1.3
-                        ram = ram * 1.3
-                        disco = ram * 1.3
+                    if hora_atual < 18 and ram is not None and cpu is not None and disco is not None:
+                        if is_inicio_pico:
+                            cpu = nova_leitura(cpu)
+                            ram = nova_leitura(ram)
+                            if is_multa:
+                                disco = nova_leitura(disco)
                         
-                    if hora_atual < 23:
-                        cpu = cpu * 1.1
-                        ram = ram * 1.1
-                        disco = ram * 1.1                        
+                    if hora_atual < 21 and ram is not None and cpu is not None and disco is not None:
+                        ram = nova_leitura(ram, True)
+                        cpu = nova_leitura(cpu, True)
+                        if is_multa:
+                            disco = nova_leitura(disco, True)
+                        
+                    if hora_atual < 23 and ram is not None and cpu is not None and disco is not None:
+                        if is_comum:
+                            cpu = nova_leitura(cpu)
+                            ram = nova_leitura(ram)
+                            if is_multa:
+                                disco = nova_leitura(disco)      
                     
                     with open(f'./{nome_arquivo}', 'a', newline='') as csvfile:
                         csvfile.write(f"{modelo_nome},{uuid},{cpu},{ram},{disco},{upload_mbps},{total_processos},{data_hora}\n")
@@ -391,16 +445,17 @@ def coletar_dados():
                     if alvo_ram: print(f"Memória: {ram}%")
                     if alvo_disco: print(f"Disco: {disco}%")
                     if alvo_rede: print(f"Rede: {upload_mbps} Mbps")
+                    print(f'Teve multa? {is_multa}')
                     
                     print("Data e hora local:", data_hora)
                     print("---------------------------------------------")
                     
-                    if (contador_coletas == 3):
+                    if (contador_coletas == 4500000):
                         enviar_arquivo(nome_arquivo, chave_s3)
                         contador_coletas = 0
                         contador_lote += 1
                     
-                    time.sleep(5)
+                    time.sleep(29)
                     
             except KeyboardInterrupt:
                 print("Programa encerrado de forma abrupta")
