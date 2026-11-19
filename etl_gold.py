@@ -7,6 +7,7 @@ import mysql.connector
 from datetime import datetime 
 from datetime import date 
 import time
+import numpy as np
 
 
 def descobrir_quantidade():
@@ -105,29 +106,36 @@ def ouro():
             horas = list(range(len(leituraUnica)))
             
             def calc_predicao(componente):
-                import numpy as np
                 from datetime import datetime, timedelta
                 data_limite = datetime.now() - timedelta(days=3)
                 df_filtro = leituraUnica[(leituraUnica['Empresa ID'] == e['id']) & (leituraUnica['data/hora'] >= data_limite)]
                 horas = list(range(len(df_filtro)))
                 y_vals = df_filtro[componente].values
                 if len(y_vals) < 2:
-                    return None
+                    return None, None, None
                 inclinacao, intercepto = np.polyfit(horas, y_vals, 1)
+                correlacao = np.corrcoef(horas, y_vals)[0, 1]
+                r_quadrado = correlacao ** 2
                 limite_max = df_filtro[f'Valor maximo {componente.upper()}'].iloc[0]
                 if inclinacao != 0:
-                    return (limite_max - intercepto) / inclinacao
+                    return (limite_max - intercepto) / inclinacao, r_quadrado, inclinacao
                 else:
-                    return None
+                    return None, None, None
             
             predicao = []
             for comp in ['ram', 'cpu', 'disco']:
-                valor_pred = calc_predicao(comp)
+                valor_pred, r_quadrado, inclinacao = calc_predicao(comp)
                 if valor_pred is not None:
                     valor_pred = round(valor_pred, 1)
-                else:
-                    valor_pred = None
-                predicao.append({comp.upper(): valor_pred})
+                    r_quadrado = round(r_quadrado, 3)
+                    inclinacao = round(inclinacao, 3)
+                predicao.append({
+                    comp.upper(): {
+                        'horas': valor_pred,
+                        'r_quadrado': r_quadrado,
+                        'inclinacao': inclinacao
+                    }
+                })
 
             json1 = {
                 'maquina': leituraUnica['maquina'][l],
