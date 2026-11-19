@@ -37,13 +37,12 @@ def ouro():
    aws_access_key_id="",
    aws_secret_access_key="",
    aws_session_token="",
-   region_name="us-east-1",  # Substitua pela sua região se necessário
+   region_name="us-east-1"
     )
 
     s3_client = session.client("s3")
     s3_resource = session.resource("s3")
     BUCKET_NAME = ""
-
     
     bucket = s3_resource.Bucket(BUCKET_NAME)
     buckets_objects = bucket.objects.all()
@@ -56,7 +55,7 @@ def ouro():
     
     print(f"-------Objetos do bucket alcançados com sucesso------------")
 
-    i = 0;
+    i = 0
 
     dfs = []
     for j in objects:
@@ -71,7 +70,7 @@ def ouro():
              dfs.append(df)
              if "comp" in aq:
                   os.remove(aq)
-        i += 1;    
+        i += 1
 
     leitura = pandas.concat(dfs, ignore_index=True)
     leitura['data/hora'] = pandas.to_datetime(leitura['data/hora'], errors='coerce')
@@ -176,9 +175,7 @@ def ouro():
                 os.remove(f"./{a}")
     
 
-    print("-------Arquivo enviado para bucket no prefixo ouro------------")            
-    time.sleep(60)
-    ouro()            
+    print("-------Arquivo enviado para bucket no prefixo ouro------------")                     
   except KeyboardInterrupt:
        print("Código interrompido de forma brusca!")
 
