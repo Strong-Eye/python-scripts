@@ -34,15 +34,15 @@ def descobrir_quantidade():
 def ouro():
   try:  
     session = boto3.Session(
-   aws_access_key_id="",
-   aws_secret_access_key="",
-   aws_session_token="",
-   region_name="us-east-1"
+        aws_access_key_id="",
+        aws_secret_access_key="",
+        aws_session_token="",
+        region_name="us-east-1"
     )
 
     s3_client = session.client("s3")
     s3_resource = session.resource("s3")
-    BUCKET_NAME = ""
+    BUCKET_NAME = "strong-eye-s3-data-lake-us-east-1-d01mh1ttcp"
     
     bucket = s3_resource.Bucket(BUCKET_NAME)
     buckets_objects = bucket.objects.all()
@@ -85,74 +85,48 @@ def ouro():
         jsonFinal = []
         linhas = leitura.loc[leitura["Empresa ID"] == e["id"]]
         leituraUnica = pandas.DataFrame(linhas)
-        c = leituraUnica[leituraUnica['Empresa ID'] == e["id"]].index.values.astype(int)
-        
-        for l in c:
-            horas = list(range(len(leituraUnica)))
-            
-        def calc_predicao(componente):
-            df_empresa = leituraUnica[leituraUnica['Empresa ID'] == e['id']]
-            if df_empresa.empty:
-                return None, None, None
+        ultimas = leituraUnica.sort_values('data/hora').groupby('uuid').tail(1)
+        for l in ultimas.index:
+            historico = leituraUnica[leituraUnica['uuid'] == leituraUnica['uuid'][l]]
+            horas = list(range(len(historico)))
 
-            max_data = df_empresa['data/hora'].max()
-            data_limite = max_data - timedelta(days=3)
+            predicao = []
+            for comp in ['ram', 'cpu', 'disco']:
+                y_vals = historico[comp].values
+                valor_pred, r_quadrado, inclinacao = None, None, None
+                if len(y_vals) >= 2:
+                    inclinacao, intercepto = np.polyfit(horas, y_vals, 1)
+                    r_quadrado = np.corrcoef(horas, y_vals)[0, 1] ** 2
+                    limite_max = historico[f'Valor maximo {comp.upper()}'].iloc[0]
+                    if inclinacao != 0:
+                        valor_pred = round((limite_max - intercepto) / inclinacao, 1)
+                        r_quadrado = round(r_quadrado, 3)
+                        inclinacao = round(inclinacao, 3)
+                    else:
+                        r_quadrado, inclinacao = None, None
+                predicao.append({comp.upper(): {'horas': valor_pred, 'r_quadrado': r_quadrado, 'inclinacao': inclinacao}})
 
-            df_filtro = df_empresa[df_empresa['data/hora'] >= data_limite]
-
-            horas = list(range(len(df_filtro)))
-            y_vals = df_filtro[componente].values
-
-            if len(y_vals) < 2:
-                return None, None, None
-
-            inclinacao, intercepto = np.polyfit(horas, y_vals, 1)
-            correlacao = np.corrcoef(horas, y_vals)[0, 1]
-            r_quadrado = correlacao ** 2
-
-            limite_max = df_filtro[f'Valor maximo {componente.upper()}'].iloc[0]
-
-            if inclinacao != 0:
-                return (limite_max - intercepto) / inclinacao, r_quadrado, inclinacao
-            else:
-                return None, None, None
-        
-        predicao = []
-        for comp in ['ram', 'cpu', 'disco']:
-            valor_pred, r_quadrado, inclinacao = calc_predicao(comp)
-            if valor_pred is not None:
-                valor_pred = round(valor_pred, 1)
-                r_quadrado = round(r_quadrado, 3)
-                inclinacao = round(inclinacao, 3)
-            predicao.append({
-                comp.upper(): {
-                    'horas': valor_pred,
-                    'r_quadrado': r_quadrado,
-                    'inclinacao': inclinacao
-                }
-            })
-
-        json1 = {
-            'maquina': leituraUnica['maquina'][l],
-            'uuid': leituraUnica['uuid'][l],
-            'cpu': float(leituraUnica['cpu'][l]),
-            'ram': float(leituraUnica['ram'][l]),
-            'disco': float(leituraUnica['disco'][l]),
-            'rede': float(leituraUnica['rede'][l]),
-            'total_processos': int(leituraUnica['total_processos'][l]),
-            'data/hora': leituraUnica['data/hora'][l].strftime('%Y-%m-%d %H:%M:%S'),
-            'Valor maximo CPU': int(leituraUnica['Valor maximo CPU'][l]),
-            'Valor minimo CPU': int(leituraUnica['Valor minimo CPU'][l]),
-            'Valor maximo RAM': int(leituraUnica['Valor maximo RAM'][l]),
-            'Valor minimo RAM': int(leituraUnica['Valor minimo RAM'][l]),
-            'Valor maximo DISCO': int(leituraUnica['Valor maximo DISCO'][l]),
-            'Valor minimo DISCO': int(leituraUnica['Valor minimo DISCO'][l]),
-            'Valor maximo NET': int(leituraUnica['Valor maximo NET'][l]),
-            'Valor minimo NET': int(leituraUnica['Valor minimo NET'][l]),
-            'Empresa ID': int(leituraUnica['Empresa ID'][l]),
-            'predicao': predicao
-        }
-        jsonFinal.append(json1)
+            json1 = {
+                'maquina': leituraUnica['maquina'][l],
+                'uuid': leituraUnica['uuid'][l],
+                'cpu': float(leituraUnica['cpu'][l]),
+                'ram': float(leituraUnica['ram'][l]),
+                'disco': float(leituraUnica['disco'][l]),
+                'rede': float(leituraUnica['rede'][l]),
+                'total_processos': int(leituraUnica['total_processos'][l]),
+                'data/hora': leituraUnica['data/hora'][l].strftime('%Y-%m-%d %H:%M:%S'),
+                'Valor maximo CPU': int(leituraUnica['Valor maximo CPU'][l]),
+                'Valor minimo CPU': int(leituraUnica['Valor minimo CPU'][l]),
+                'Valor maximo RAM': int(leituraUnica['Valor maximo RAM'][l]),
+                'Valor minimo RAM': int(leituraUnica['Valor minimo RAM'][l]),
+                'Valor maximo DISCO': int(leituraUnica['Valor maximo DISCO'][l]),
+                'Valor minimo DISCO': int(leituraUnica['Valor minimo DISCO'][l]),
+                'Valor maximo NET': int(leituraUnica['Valor maximo NET'][l]),
+                'Valor minimo NET': int(leituraUnica['Valor minimo NET'][l]),
+                'Empresa ID': int(leituraUnica['Empresa ID'][l]),
+                'predicao': predicao
+            }
+            jsonFinal.append(json1)
             
         data = datetime.now()    
         dia = date.today()
