@@ -96,14 +96,60 @@ def ouro():
     except:
          print("consulta no banco falhou") 
     for e in empresas:
-        
-    
         jsonFinal = [];
         linhas = leitura.loc[leitura["Empresa ID"] == e["id"]]
         leituraUnica = pandas.DataFrame(linhas)
         c = leituraUnica[leituraUnica['Empresa ID'] == e["id"]].index.values.astype(int)
         
         for l in c:
+            horas = list(range(len(leituraUnica)))
+            
+            def calc_predicao(componente):
+                import numpy as np
+                from datetime import datetime, timedelta
+                data_limite = datetime.now() - timedelta(days=3)
+                df_filtro = leituraUnica[(leituraUnica['Empresa ID'] == e['id']) & (leituraUnica['data/hora'] >= data_limite)]
+                horas = list(range(len(df_filtro)))
+                y_vals = df_filtro[componente].values
+                if len(y_vals) < 2:
+                    return None
+                inclinacao, intercepto = np.polyfit(horas, y_vals, 1)
+                limite_max = df_filtro[f'Valor maximo {componente.upper()}'].iloc[0]
+                if inclinacao != 0:
+                    return (limite_max - intercepto) / inclinacao
+                else:
+                    return None
+            
+            predicao = []
+            for comp in ['ram', 'cpu', 'disco']:
+                valor_pred = calc_predicao(comp)
+                if valor_pred is not None:
+                    valor_pred = round(valor_pred, 1)
+                else:
+                    valor_pred = None
+                predicao.append({comp.upper(): valor_pred})
+
+            json1 = {
+                'maquina': leituraUnica['maquina'][l],
+                'uuid': leituraUnica['uuid'][l],
+                'cpu': float(leituraUnica['cpu'][l]),
+                'ram': float(leituraUnica['ram'][l]),
+                'disco': float(leituraUnica['disco'][l]),
+                'rede': float(leituraUnica['rede'][l]),
+                'total_processos': int(leituraUnica['total_processos'][l]),
+                'data/hora': leituraUnica['data/hora'][l],
+                'Valor maximo CPU': int(leituraUnica['Valor maximo CPU'][l]),
+                'Valor minimo CPU': int(leituraUnica['Valor minimo CPU'][l]),
+                'Valor maximo RAM': int(leituraUnica['Valor maximo RAM'][l]),
+                'Valor minimo RAM': int(leituraUnica['Valor minimo RAM'][l]),
+                'Valor maximo DISCO': int(leituraUnica['Valor maximo DISCO'][l]),
+                'Valor minimo DISCO': int(leituraUnica['Valor minimo DISCO'][l]),
+                'Valor maximo NET': int(leituraUnica['Valor maximo NET'][l]),
+                'Valor minimo NET': int(leituraUnica['Valor minimo NET'][l]),
+                'Empresa ID': int(leituraUnica['Empresa ID'][l]),
+                'predicao': predicao
+            }
+            jsonFinal.append(json1)
             json1 = {
                 'maquina': leituraUnica['maquina'][l],
                 'uuid': leituraUnica['uuid'][l],
