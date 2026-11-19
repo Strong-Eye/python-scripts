@@ -5,65 +5,54 @@ import json
 import glob
 import mysql.connector
 from datetime import datetime 
-from datetime import date 
+from datetime import date
+from datetime import timedelta
 import time
 import numpy as np
 
-
-def descobrir_quantidade():
-
-    mydb = mysql.connector.connect(
-            host="localhost",
-            user="USER",
-            password="SENHA",
-            database="DATABASE"
-    )
-    
-      
+def descobrir_quantidade():      
     try:
+        mydb = mysql.connector.connect(
+            host="localhost",
+            user="aluno",
+            password="sptech",
+            database="strong_eye"
+        )
 
-            sql = f"select nome_fantasia, id from empresas;";
-            cursor = mydb.cursor(dictionary=True)
-            
-            cursor.execute(sql)
-            
-            resultado = cursor.fetchall()    
-
-            
+        sql = f"select nome_fantasia, id from strong_eye.empresas;"
+        cursor = mydb.cursor(dictionary=True)
         
+        cursor.execute(sql)
+        
+        resultado = cursor.fetchall()    
 
-            return resultado
-    except :
-                    print("Consulta no banco falhou")
+        return resultado
+    except Exception as erro:
+        print(f"Erro durante a consulta: {erro}")
+        return None
 
 def ouro():
-
   try:  
     session = boto3.Session(
-   aws_access_key_id="AWS_ACCESS_KEY",
-   aws_secret_access_key="AWS_SECRET_ACCESS",
-   aws_session_token="AWS_SESSION_TOKEN",
+   aws_access_key_id="",
+   aws_secret_access_key="",
+   aws_session_token="",
    region_name="us-east-1",  # Substitua pela sua região se necessário
     )
 
     s3_client = session.client("s3")
     s3_resource = session.resource("s3")
+    BUCKET_NAME = ""
 
     
-    bucket = s3_resource.Bucket("NOME_BUCKET")
+    bucket = s3_resource.Bucket(BUCKET_NAME)
     buckets_objects = bucket.objects.all()
     objects = []
 
-    
-    
-
     for i in buckets_objects:
         #exemplo READ-1.csv / Letras iniciais = REA  
-        if( "raw/3_Letras_iniciais_dos_Arquivos" in i.key):
+        if( "trusted/lei" in i.key):
             objects.append(i.key)
-
-    
-
     
     print(f"-------Objetos do bucket alcançados com sucesso------------")
 
@@ -72,9 +61,8 @@ def ouro():
     dfs = []
     for j in objects:
         
-        
         with open(f'./comp{i}.csv', 'wb') as f:
-            s3_client.download_fileobj('NOME_BUCKET', f'{j}', f) 
+            s3_client.download_fileobj(BUCKET_NAME, f'{j}', f) 
             f.write(b'\n')
         
         arq = glob.glob("./*.csv")
@@ -85,10 +73,8 @@ def ouro():
                   os.remove(aq)
         i += 1;    
 
-
-
-   
     leitura = pandas.concat(dfs, ignore_index=True)
+    leitura['data/hora'] = pandas.to_datetime(leitura['data/hora'], errors='coerce')
     print("Data frame foi criado")
 
     try:
@@ -97,7 +83,7 @@ def ouro():
     except:
          print("consulta no banco falhou") 
     for e in empresas:
-        jsonFinal = [];
+        jsonFinal = []
         linhas = leitura.loc[leitura["Empresa ID"] == e["id"]]
         leituraUnica = pandas.DataFrame(linhas)
         c = leituraUnica[leituraUnica['Empresa ID'] == e["id"]].index.values.astype(int)
@@ -105,97 +91,84 @@ def ouro():
         for l in c:
             horas = list(range(len(leituraUnica)))
             
-            def calc_predicao(componente):
-                from datetime import datetime, timedelta
-                data_limite = datetime.now() - timedelta(days=3)
-                df_filtro = leituraUnica[(leituraUnica['Empresa ID'] == e['id']) & (leituraUnica['data/hora'] >= data_limite)]
-                horas = list(range(len(df_filtro)))
-                y_vals = df_filtro[componente].values
-                if len(y_vals) < 2:
-                    return None, None, None
-                inclinacao, intercepto = np.polyfit(horas, y_vals, 1)
-                correlacao = np.corrcoef(horas, y_vals)[0, 1]
-                r_quadrado = correlacao ** 2
-                limite_max = df_filtro[f'Valor maximo {componente.upper()}'].iloc[0]
-                if inclinacao != 0:
-                    return (limite_max - intercepto) / inclinacao, r_quadrado, inclinacao
-                else:
-                    return None, None, None
-            
-            predicao = []
-            for comp in ['ram', 'cpu', 'disco']:
-                valor_pred, r_quadrado, inclinacao = calc_predicao(comp)
-                if valor_pred is not None:
-                    valor_pred = round(valor_pred, 1)
-                    r_quadrado = round(r_quadrado, 3)
-                    inclinacao = round(inclinacao, 3)
-                predicao.append({
-                    comp.upper(): {
-                        'horas': valor_pred,
-                        'r_quadrado': r_quadrado,
-                        'inclinacao': inclinacao
-                    }
-                })
+        def calc_predicao(componente):
+            df_empresa = leituraUnica[leituraUnica['Empresa ID'] == e['id']]
+            if df_empresa.empty:
+                return None, None, None
 
-            json1 = {
-                'maquina': leituraUnica['maquina'][l],
-                'uuid': leituraUnica['uuid'][l],
-                'cpu': float(leituraUnica['cpu'][l]),
-                'ram': float(leituraUnica['ram'][l]),
-                'disco': float(leituraUnica['disco'][l]),
-                'rede': float(leituraUnica['rede'][l]),
-                'total_processos': int(leituraUnica['total_processos'][l]),
-                'data/hora': leituraUnica['data/hora'][l],
-                'Valor maximo CPU': int(leituraUnica['Valor maximo CPU'][l]),
-                'Valor minimo CPU': int(leituraUnica['Valor minimo CPU'][l]),
-                'Valor maximo RAM': int(leituraUnica['Valor maximo RAM'][l]),
-                'Valor minimo RAM': int(leituraUnica['Valor minimo RAM'][l]),
-                'Valor maximo DISCO': int(leituraUnica['Valor maximo DISCO'][l]),
-                'Valor minimo DISCO': int(leituraUnica['Valor minimo DISCO'][l]),
-                'Valor maximo NET': int(leituraUnica['Valor maximo NET'][l]),
-                'Valor minimo NET': int(leituraUnica['Valor minimo NET'][l]),
-                'Empresa ID': int(leituraUnica['Empresa ID'][l]),
-                'predicao': predicao
-            }
-            jsonFinal.append(json1)
-            json1 = {
-                'maquina': leituraUnica['maquina'][l],
-                'uuid': leituraUnica['uuid'][l],
-                'cpu': float(leituraUnica['cpu'][l]),
-                'ram':float(leituraUnica['ram'][l]),
-                'disco': float(leituraUnica['disco'][l]),
-                'rede':float(leituraUnica['rede'][l]),
-                'total_processos':int(leituraUnica['total_processos'][l]),
-                'data/hora':leituraUnica['data/hora'][l],
-                'Valor maximo CPU':int(leituraUnica['Valor maximo CPU'][l]),
-                'Valor minimo CPU':int(leituraUnica['Valor minimo CPU'][l]),
-                'Valor maximo RAM':int(leituraUnica['Valor maximo RAM'][l]),
-                'Valor minimo RAM':int(leituraUnica['Valor minimo RAM'][l]),
-                'Valor maximo DISCO':int(leituraUnica['Valor maximo DISCO'][l]),
-                'Valor minimo DISCO':int(leituraUnica['Valor minimo DISCO'][l]),
-                'Valor maximo NET':int(leituraUnica['Valor maximo NET'][l]),
-                'Valor minimo NET':int(leituraUnica['Valor minimo NET'][l]),
-                'Empresa ID':int(leituraUnica['Empresa ID'][l])
+            max_data = df_empresa['data/hora'].max()
+            data_limite = max_data - timedelta(days=3)
+
+            df_filtro = df_empresa[df_empresa['data/hora'] >= data_limite]
+
+            horas = list(range(len(df_filtro)))
+            y_vals = df_filtro[componente].values
+
+            if len(y_vals) < 2:
+                return None, None, None
+
+            inclinacao, intercepto = np.polyfit(horas, y_vals, 1)
+            correlacao = np.corrcoef(horas, y_vals)[0, 1]
+            r_quadrado = correlacao ** 2
+
+            limite_max = df_filtro[f'Valor maximo {componente.upper()}'].iloc[0]
+
+            if inclinacao != 0:
+                return (limite_max - intercepto) / inclinacao, r_quadrado, inclinacao
+            else:
+                return None, None, None
+        
+        predicao = []
+        for comp in ['ram', 'cpu', 'disco']:
+            valor_pred, r_quadrado, inclinacao = calc_predicao(comp)
+            if valor_pred is not None:
+                valor_pred = round(valor_pred, 1)
+                r_quadrado = round(r_quadrado, 3)
+                inclinacao = round(inclinacao, 3)
+            predicao.append({
+                comp.upper(): {
+                    'horas': valor_pred,
+                    'r_quadrado': r_quadrado,
+                    'inclinacao': inclinacao
                 }
-            
-            jsonFinal.append(json1)
+            })
+
+        json1 = {
+            'maquina': leituraUnica['maquina'][l],
+            'uuid': leituraUnica['uuid'][l],
+            'cpu': float(leituraUnica['cpu'][l]),
+            'ram': float(leituraUnica['ram'][l]),
+            'disco': float(leituraUnica['disco'][l]),
+            'rede': float(leituraUnica['rede'][l]),
+            'total_processos': int(leituraUnica['total_processos'][l]),
+            'data/hora': leituraUnica['data/hora'][l].strftime('%Y-%m-%d %H:%M:%S'),
+            'Valor maximo CPU': int(leituraUnica['Valor maximo CPU'][l]),
+            'Valor minimo CPU': int(leituraUnica['Valor minimo CPU'][l]),
+            'Valor maximo RAM': int(leituraUnica['Valor maximo RAM'][l]),
+            'Valor minimo RAM': int(leituraUnica['Valor minimo RAM'][l]),
+            'Valor maximo DISCO': int(leituraUnica['Valor maximo DISCO'][l]),
+            'Valor minimo DISCO': int(leituraUnica['Valor minimo DISCO'][l]),
+            'Valor maximo NET': int(leituraUnica['Valor maximo NET'][l]),
+            'Valor minimo NET': int(leituraUnica['Valor minimo NET'][l]),
+            'Empresa ID': int(leituraUnica['Empresa ID'][l]),
+            'predicao': predicao
+        }
+        jsonFinal.append(json1)
             
         data = datetime.now()    
         dia = date.today()
         with open(f'leitura_{dia}_{data.hour}-{data.minute}_{e["nome_fantasia"]}.json','w', encoding='cp1252') as f:
                 json.dump(jsonFinal,f,ensure_ascii=False, indent = 2 )      
-        s3_client.upload_file(f'./leitura_{dia}_{data.hour}-{data.minute}_{e["nome_fantasia"]}.json', "atvd-itops", f"ouro/leitura_{dia}_{data.hour}-{data.minute}_{e["nome_fantasia"]}.json")  
-
-        
+        s3_client.upload_file(f'./leitura_{dia}_{data.hour}-{data.minute}_{e["nome_fantasia"]}.json', BUCKET_NAME, f"client/leitura_{dia}_{data.hour}-{data.minute}_{e["nome_fantasia"]}.json")  
 
         print("Arquivo json criado com sucesso")        
-        arquivosJson = glob.glob("./*.json");
+        arquivosJson = glob.glob("./*.json")
 
         for js in arquivosJson:
                   if"lei" in js:
                         os.remove(f"./{js}")
 
-    arquivos = glob.glob("./*.csv");
+    arquivos = glob.glob("./*.csv")
     
 
     for a in arquivos:
@@ -209,5 +182,4 @@ def ouro():
   except KeyboardInterrupt:
        print("Código interrompido de forma brusca!")
 
-ouro();
-        
+ouro()
