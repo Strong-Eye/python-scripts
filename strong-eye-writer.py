@@ -1,3 +1,4 @@
+import csv
 import requests
 import platform
 import subprocess
@@ -30,6 +31,13 @@ modelo_nome = None
 contador_coletas = 0
 contador_lote = 1
 
+SEP = ";"
+CABECALHO = [
+    "maquina", "uuid", "cpu", "ram", "disco",
+    "bytes_enviados_inicio", "bytes_enviados_fim", "intervalo_seg",
+    "total_processos", "total_threads", "top_processos", "data_hora",
+]
+
 def cara_ou_coroa(numero_tentativas):
     for i in range(numero_tentativas):
         if random.randint(0, 1) == 0:
@@ -37,6 +45,31 @@ def cara_ou_coroa(numero_tentativas):
         else:
             return False
     return True
+
+def capturar_processos(limite=30):
+    processos = []
+    for p in psutil.process_iter():
+        if p.pid == 0:  # System Idle Process
+            continue
+        try:
+            inicio = "N/A" if p.pid == 4 else datetime.fromtimestamp(
+                p.create_time()
+            ).strftime("%H%M%S")
+            processos.append((p.pid, p.name(), p.status(), p.num_threads(), inicio))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+
+    total_threads = sum(p[3] for p in processos)
+    top = sorted(processos, key=lambda t: t[3], reverse=True)[:limite]
+
+    def limpar(v):
+        t = str(v)
+        for c in (SEP, "|", "&", "\n", "\r"):
+            t = t.replace(c, " ")
+        return t
+
+    texto = "&".join("|".join(limpar(c) for c in p) for p in top)
+    return total_threads, texto
 
 def obter_uuid_da_placa():
     sistema = platform.system().lower()
@@ -334,23 +367,33 @@ def coletar_dados():
                     global contador_lote
                     nome_arquivo, chave_s3 = gerar_nomes_arquivo(contador_lote)
                     
+                    # [ALTERADO] cabeçalho com csv.writer e 12 colunas
                     if not Path(f"./{nome_arquivo}").exists():
-                        with open(f'./{nome_arquivo}', 'a', newline='') as csvfile:
-                            csvfile.write("maquina,uuid,cpu,ram,desco,rede,total_processos,data/hora\n")
+                        with open(f'./{nome_arquivo}', 'a', newline='', encoding='utf-8') as csvfile:
+                            csv.writer(csvfile, delimiter=SEP).writerow(CABECALHO)
                     
                     cpu = psutil.cpu_percent(interval=1) if alvo_cpu else None
                     ram = psutil.virtual_memory().percent if alvo_ram else None
                     disco = psutil.disk_usage("/").percent if alvo_disco else None
                     total_processos = len(psutil.pids())
 
-                    if alvo_rede == True:
-                        rede_inicio = psutil.net_io_counters() 
+                    if alvo_rede:
+                        rede_inicio = psutil.net_io_counters()
+                        t0 = time.perf_counter()
                         time.sleep(1)
                         rede_fim = psutil.net_io_counters()
-                        upload_mbps = f"{(rede_fim.bytes_sent - rede_inicio.bytes_sent) * 8 / 1_000_000:.3f}"
+                        intervalo_seg = time.perf_counter() - t0
+                    
+                        bytes_enviados_inicio = rede_inicio.bytes_sent
+                        bytes_enviados_fim = rede_fim.bytes_sent
                     else:
-                        upload_mbps = None
+                        bytes_enviados_inicio = None
+                        bytes_enviados_fim = None
+                        intervalo_seg = None
 
+                    # [NOVO] captura de processos
+                    total_threads, top_processos = capturar_processos()
+                        
                     data_hora = datetime.now().replace(microsecond=0)
                     
                     # Aplicando a regra de negócio
@@ -435,8 +478,13 @@ def coletar_dados():
                             if is_multa:
                                 disco = nova_leitura(disco)      
                     
-                    with open(f'./{nome_arquivo}', 'a', newline='') as csvfile:
-                        csvfile.write(f"{modelo_nome},{uuid},{cpu},{ram},{disco},{upload_mbps},{total_processos},{data_hora}\n")
+                    # [ALTERADO] linha gravada com csv.writer, 12 colunas
+                    with open(f'./{nome_arquivo}', 'a', newline='', encoding='utf-8') as csvfile:
+                        csv.writer(csvfile, delimiter=SEP).writerow([
+                            modelo_nome, uuid, cpu, ram, disco,
+                            bytes_enviados_inicio, bytes_enviados_fim, intervalo_seg,
+                            total_processos, total_threads, top_processos, data_hora,
+                        ])
                     
                     global contador_coletas
                     contador_coletas += 1
@@ -444,18 +492,18 @@ def coletar_dados():
                     if alvo_cpu: print(f"CPU: {cpu}%")
                     if alvo_ram: print(f"Memória: {ram}%")
                     if alvo_disco: print(f"Disco: {disco}%")
-                    if alvo_rede: print(f"Rede: {upload_mbps} Mbps")
+                    if alvo_rede: print(f"Rede: {bytes_enviados_inicio}, {bytes_enviados_fim}, {intervalo_seg} Mbps")
                     print(f'Teve multa? {is_multa}')
                     
                     print("Data e hora local:", data_hora)
                     print("---------------------------------------------")
                     
-                    if (contador_coletas == 4500000):
+                    if (contador_coletas == 5):
                         enviar_arquivo(nome_arquivo, chave_s3)
                         contador_coletas = 0
                         contador_lote += 1
                     
-                    time.sleep(29)
+                    time.sleep(10)
                     
             except KeyboardInterrupt:
                 print("Programa encerrado de forma abrupta")
