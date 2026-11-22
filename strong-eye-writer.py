@@ -5,7 +5,6 @@ import subprocess
 import psutil
 import time
 import os
-import boto3
 import random
 from pathlib import Path
 from getpass import getpass
@@ -16,9 +15,8 @@ from dotenv import load_dotenv
 load_dotenv()
 ip_api = os.getenv("IP_API")
 porta_api = os.getenv("PORTA_API")
-session = os.getenv("SESSION_AWS")
-bucket_name = os.getenv("BUCKET_NAME")
-s3_client = boto3.client("s3")
+lambda_url = os.getenv("LAMBDA_URL")
+lambda_token = os.getenv("LAMBDA_TOKEN")
 
 id_usuario = None
 nome_usuario = None
@@ -313,10 +311,20 @@ def gerar_nomes_arquivo(contador_lote):
 
 def enviar_arquivo(nome_arquivo, chave_s3):
     try:
-        s3_client.upload_file(nome_arquivo, bucket_name, chave_s3)
-        print(f"Sincronizado no S3: s3://{bucket_name}/{chave_s3}")
+        with open(f"./{nome_arquivo}", "rb") as f:
+            r = requests.post(
+                lambda_url,
+                params={"nome": nome_arquivo},
+                data=f.read(),
+                headers={"x-api-key": lambda_token, "Content-Type": "text/csv"},
+                timeout=15,
+            )
+        if r.ok:
+            print(f"Enviado para o S3: {chave_s3}")
+        else:
+            print(f"Erro ao enviar: {r.status_code} {r.text}")
     except Exception as e:
-        print(f"Erro ao enviar para o S3: {e}")
+        print(f"Erro ao enviar: {e}")
         
 def coletar_dados():
     print("Iniciando processo de monitoramento")
