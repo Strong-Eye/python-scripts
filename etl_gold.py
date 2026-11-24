@@ -1,156 +1,577 @@
-import boto3
-import pandas
 import os
+import io
+import re
 import json
-import glob
-import mysql.connector
-from datetime import datetime 
-from datetime import date
-from datetime import timedelta
-import time
+import logging
+from datetime import datetime
+
+import boto3
 import numpy as np
+import pandas as pd
+import mysql.connector
 
-def descobrir_quantidade():      
-    try:
-        mydb = mysql.connector.connect(
-            host="localhost",
-            user="aluno",
-            password="sptech",
-            database="strong_eye"
-        )
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
-        sql = f"select nome_fantasia, id from strong_eye.empresas;"
-        cursor = mydb.cursor(dictionary=True)
-        
-        cursor.execute(sql)
-        
-        resultado = cursor.fetchall()    
+BUCKET = os.environ["BUCKET_NAME"]
+PREFIXO_ENTRADA = os.environ.get("PREFIXO_ENTRADA", "trusted/lei")
+PREFIXO_SAIDA = os.environ.get("PREFIXO_SAIDA", "client/")
 
-        return resultado
-    except Exception as erro:
-        print(f"Erro durante a consulta: {erro}")
-        return None
+LATITUDE = float(os.environ.get("LATITUDE", "-23.7145"))
+LONGITUDE = float(os.environ.get("LONGITUDE", "-46.4132"))
+HORIZONTES = tuple(int(h) for h in os.environ.get("HORIZONTES", "14").split(","))
+MIN_DIAS_HISTORICO = int(os.environ.get("MIN_DIAS_HISTORICO", "2"))
 
-def ouro():
-  try:  
-    session = boto3.Session(
-        aws_access_key_id="",
-        aws_secret_access_key="",
-        aws_session_token="",
-        region_name="us-east-1"
+COMPONENTES_PADRAO = ["cpu", "ram", "disco", "rede"]
+
+MAX_HISTORICO = 30
+COMPONENTES_JSON = ["ram", "cpu", "disco"]
+
+STATUS_ZUMBI = {"zombie", "stopped"}
+
+s3 = boto3.client("s3")
+
+
+# ----------------------------------------------------------------------------
+# Banco
+# ----------------------------------------------------------------------------
+def buscar_empresas():
+    conn = mysql.connector.connect(
+        host=os.environ["DB_HOST"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        database=os.environ.get("DB_NAME", "strong_eye"),
+        connection_timeout=5
     )
 
-    s3_client = session.client("s3")
-    s3_resource = session.resource("s3")
-    BUCKET_NAME = "strong-eye-s3-data-lake-us-east-1-d01mh1ttcp"
-    
-    bucket = s3_resource.Bucket(BUCKET_NAME)
-    buckets_objects = bucket.objects.all()
-    objects = []
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("select nome_fantasia, id from empresas")
+        return cur.fetchall()
+    finally:
+        conn.close()
 
-    for i in buckets_objects:
-        #exemplo READ-1.csv / Letras iniciais = REA  
-        if( "trusted/lei" in i.key):
-            objects.append(i.key)
-    
-    print(f"-------Objetos do bucket alcançados com sucesso------------")
 
-    i = 0
+# ----------------------------------------------------------------------------
+# Leitura da silver
+# ----------------------------------------------------------------------------
+def normalizar(df):
+    df.columns = [str(c).strip().lower() for c in df.columns]
 
+    df = df.loc[:, ~df.columns.duplicated(keep="last")]
+
+    if "data/hora" not in df.columns and "data_hora" in df.columns:
+        df = df.rename(columns={"data_hora": "data/hora"})
+
+    if "rede" not in df.columns and "rede_mbps" in df.columns:
+        df = df.rename(columns={"rede_mbps": "rede"})
+
+    return df
+
+
+def ler_leituras():
     dfs = []
-    for j in objects:
-        
-        with open(f'./comp{i}.csv', 'wb') as f:
-            s3_client.download_fileobj(BUCKET_NAME, f'{j}', f) 
-            f.write(b'\n')
-        
-        arq = glob.glob("./*.csv")
-        for aq in arq:
-             df = pandas.read_csv(aq)
-             dfs.append(df)
-             if "comp" in aq:
-                  os.remove(aq)
-        i += 1
 
-    leitura = pandas.concat(dfs, ignore_index=True)
-    leitura['data/hora'] = pandas.to_datetime(leitura['data/hora'], errors='coerce')
-    print("Data frame foi criado")
+    paginator = s3.get_paginator("list_objects_v2")
+
+    for page in paginator.paginate(Bucket=BUCKET, Prefix=PREFIXO_ENTRADA):
+        for obj in page.get("Contents", []):
+            chave = obj["Key"]
+
+            if not chave.lower().endswith(".csv"):
+                continue
+
+            try:
+                corpo = s3.get_object(
+                    Bucket=BUCKET,
+                    Key=chave
+                )["Body"].read()
+
+                if corpo.strip():
+                    dfs.append(
+                        normalizar(
+                            pd.read_csv(
+                                io.BytesIO(corpo),
+                                encoding="utf-8-sig"
+                            )
+                        )
+                    )
+
+            except Exception:
+                logger.exception("Falha ao ler %s, arquivo ignorado", chave)
+
+    if not dfs:
+        return None
+
+    return pd.concat(dfs, ignore_index=True)
+
+
+def preparar(df):
+    obrigatorias = [
+        "uuid",
+        "id_radar",
+        "cpu",
+        "ram",
+        "disco",
+        "data/hora",
+        "empresa id"
+    ]
+
+    faltando = [c for c in obrigatorias if c not in df.columns]
+
+    if faltando:
+        raise RuntimeError(
+            f"CSV sem as colunas {faltando}. Colunas: {list(df.columns)}"
+        )
+
+    df = df.copy()
+
+    for col in [
+        "id_radar",
+        "cpu",
+        "ram",
+        "disco",
+        "rede",
+        "empresa id",
+        "total_processos",
+        "total_threads"
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["data/hora"] = pd.to_datetime(
+        df["data/hora"],
+        errors="coerce"
+    )
+
+    df = df.dropna(
+        subset=["uuid", "id_radar", "cpu", "ram", "disco", "empresa id", "data/hora"]
+    )
+
+    df["empresa id"] = df["empresa id"].astype(int)
+    df["id_radar"] = df["id_radar"].astype(int)
+
+    return df.drop_duplicates(
+        subset=["id_radar", "data/hora"],
+        keep="last"
+    )
+
+
+# ----------------------------------------------------------------------------
+# Processos
+# ----------------------------------------------------------------------------
+def parse_processos(texto):
+    processos = []
+
+    if not isinstance(texto, str) or not texto.strip():
+        return processos
+
+    for item in texto.split("&"):
+        partes = item.split("|")
+
+        if len(partes) < 5:
+            continue
+
+        pid = partes[0]
+        criacao = partes[-1]
+        threads = partes[-2]
+        status = partes[-3]
+
+        nome = "|".join(partes[1:-3])
+
+        processos.append({
+            "pid": int(pid) if pid.strip().isdigit() else pid,
+            "nome": nome,
+            "status": status,
+            "threads": int(threads) if threads.strip().isdigit() else None,
+            "criacao": None if criacao.strip().upper() == "N/A" else criacao
+        })
+
+    return processos
+
+
+def contar_zumbis(processos):
+    return sum(
+        1 for p in processos
+        if str(p["status"]).lower() in STATUS_ZUMBI
+    )
+
+
+# ----------------------------------------------------------------------------
+# Tendência e JSON de leitura
+# ----------------------------------------------------------------------------
+def _int(v):
+    return None if pd.isna(v) else int(round(float(v)))
+
+def montar_registro(grupo):
+    """Registro de um radar. O id_radar vira a chave do objeto em
+    montar_json_empresa; o uuid fica aqui dentro como um campo comum."""
+    grupo = grupo.sort_values("data/hora")
+    u = grupo.iloc[-1]
+
+    processos = parse_processos(u.get("top_processos"))
+    tem_lista = len(processos) > 0
+
+    return {
+        "uuid": u["uuid"],
+        "maquina": u.get("maquina"),
+        "data/hora": u["data/hora"].strftime("%Y-%m-%d %H:%M:%S"),
+
+        "Valor maximo CPU": _int(u.get("valor maximo cpu")),
+        "Valor minimo CPU": _int(u.get("valor minimo cpu")),
+
+        "Valor maximo RAM": _int(u.get("valor maximo ram")),
+        "Valor minimo RAM": _int(u.get("valor minimo ram")),
+
+        "Valor maximo DISCO": _int(u.get("valor maximo disco")),
+        "Valor minimo DISCO": _int(u.get("valor minimo disco")),
+
+        "Valor maximo NET": _int(u.get("valor maximo net")),
+        "Valor minimo NET": _int(u.get("valor minimo net")),
+
+        "Empresa ID": int(u["empresa id"]),
+
+        "processos": {
+            "TOTAL_PROCESSOS": _int(u.get("total_processos")),
+            "TOTAL_THREADS": _int(u.get("total_threads")),
+            "30_PROCESSOS": processos[:30],
+            "PROCESSOS_ZUMBI": contar_zumbis(processos) if tem_lista else None
+        },
+
+        "componentes": [
+            {comp.upper(): {
+                "historico": [
+                    round(float(v), 2) for v in grupo[comp].tail(MAX_HISTORICO)
+                ],
+                "ultimo_valor": round(float(grupo[comp].iloc[-1]), 2)
+            }}
+            for comp in COMPONENTES_JSON
+        ]
+    }
+
+
+def montar_json_empresa(df_empresa):
+    return {
+        str(int(id_radar)): montar_registro(grupo)
+        for id_radar, grupo in df_empresa.groupby("id_radar")
+    }
+
+def buscar_clima(dias):
+    import requests
+
+    resposta = requests.get(
+        "https://ensemble-api.open-meteo.com/v1/ensemble",
+        params={
+            "latitude": LATITUDE,
+            "longitude": LONGITUDE,
+            "hourly": "temperature_2m,relative_humidity_2m,precipitation",
+            "models": "ncep_gefs05",
+            "forecast_days": dias,
+            "timezone": "America/Sao_Paulo"
+        },
+        timeout=60
+    )
+
+    resposta.raise_for_status()
+
+    dados = resposta.json()["hourly"]
+
+    tempo = pd.to_datetime(dados["time"])
+
+    def membros(variavel, aceitar_unico=True):
+        colunas = [
+            c for c in dados
+            if c.startswith(variavel + "_member")
+        ]
+
+        if not colunas and aceitar_unico and variavel in dados:
+            colunas = [variavel]
+
+        if not colunas:
+            raise ValueError(
+                f"Variável {variavel} não encontrada na API: {list(dados.keys())}"
+            )
+
+        quadro = pd.DataFrame({
+            c: dados[c] for c in colunas
+        })
+
+        quadro.index = tempo
+
+        return quadro
+
+    horario = pd.DataFrame({
+        "temperatura": membros("temperature_2m").mean(axis=1),
+        "umidade": membros("relative_humidity_2m").mean(axis=1)
+    })
+
+    diario = horario.resample("1D").mean()
+
+    chuva = membros("precipitation", aceitar_unico=False)
+
+    chuva_dia = chuva.resample("1D").sum()
+
+    diario["probabilidade_chuva"] = (
+        (chuva_dia >= 10.0).sum(axis=1)
+        / chuva.shape[1]
+        * 100
+    )
+
+    diario = diario.dropna()
+
+    return {
+        dia.strftime("%Y-%m-%d"): {
+            "temperatura": round(float(l["temperatura"]), 2),
+            "umidade": round(float(l["umidade"]), 2),
+            "probabilidade_chuva": round(
+                float(l["probabilidade_chuva"]), 2
+            )
+        }
+        for dia, l in diario.iterrows()
+    }
+
+
+# ----------------------------------------------------------------------------
+# Previsão NumPy + clima
+# ----------------------------------------------------------------------------
+def prever_numpy(df_radar, clima=None):
+    passos = max(HORIZONTES)
+
+    componentes = [
+        c for c in COMPONENTES_PADRAO
+        if c in df_radar.columns
+    ]
+
+    df = df_radar.copy()
+
+    df["data/hora"] = (
+        pd.to_datetime(df["data/hora"], utc=True)
+        .dt.tz_localize(None)
+    )
+
+    diario = (
+        df.set_index("data/hora")[componentes]
+        .resample("D")
+        .mean()
+    )
+
+    ultima_data = diario.index.max()
+
+    datas_futuras = pd.date_range(
+        ultima_data + pd.Timedelta(days=1),
+        periods=passos,
+        freq="D"
+    )
+
+    resultado = {}
+
+    for comp in componentes:
+        y = (
+            diario[comp]
+            .interpolate()
+            .dropna()
+            .tail(MAX_HISTORICO)
+            .to_numpy(dtype=float)
+        )
+
+        if len(y) < MIN_DIAS_HISTORICO:
+            resultado[comp] = None
+            continue
+
+        x = np.arange(len(y), dtype=float)
+
+        # Regressão linear
+        inclinacao, intercepto = np.polyfit(x, y, 1)
+        ajustados = inclinacao * x + intercepto
+
+        # R² da regressão linear deste componente.
+        variacao_total = np.sum((y - np.mean(y)) ** 2)
+        erro_residual = y - ajustados
+
+        if variacao_total > 0:
+            r2 = 1 - (
+                np.sum(erro_residual ** 2) / variacao_total
+            )
+            confiabilidade = round(float(r2), 4)
+        else:
+            # R² é indefinido quando todos os valores históricos são iguais.
+            confiabilidade = None
+
+        resultado[comp] = {
+            "confiabilidade": confiabilidade
+        }
+
+        dias = []
+
+        for i in range(passos):
+            data = datas_futuras[i].strftime("%Y-%m-%d")
+
+            # Previsão baseada na tendência histórica.
+            previsao_base = (
+                inclinacao * (len(y) + i) + intercepto
+            )
+            previsao = previsao_base
+
+
+
+            item = {
+                "data": data,
+                "previsao": round(max(float(previsao), 0), 2)
+            }
+
+            if clima and data in clima:
+                item["clima"] = clima[data]
+
+            dias.append(item)
+
+        # Um único horizonte, até 14 dias (ou o maior valor configurado).
+        resultado[comp]["previsao"] = dias
+
+    return resultado
+
+
+def montar_previsao_empresa(df_empresa, clima):
+    resultado = {}
+    for _, df_radar in df_empresa.groupby("id_radar"):
+        id_radar = int(df_radar["id_radar"].iloc[0])
+        uuid = df_radar["uuid"].iloc[0]
+        previsao = prever_numpy(df_radar, clima)
+        previsao["uuid"] = uuid
+        resultado[str(id_radar)] = previsao
+    return resultado
+
+
+
+# ----------------------------------------------------------------------------
+# Envio para S3
+# ----------------------------------------------------------------------------
+def enviar_json(chave, conteudo):
+    corpo = json.dumps(
+        conteudo,
+        ensure_ascii=False,
+        indent=2
+    ).encode("utf-8")
+
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=chave,
+        Body=corpo,
+        ContentType="application/json"
+    )
+
+    logger.info("Enviado: %s", chave)
+
+
+# ----------------------------------------------------------------------------
+# Handler
+# ----------------------------------------------------------------------------
+def lambda_handler(event, context):
+
+    leitura = ler_leituras()
+
+    if leitura is None:
+        logger.warning(
+            "Nenhum CSV encontrado em %s",
+            PREFIXO_ENTRADA
+        )
+
+        return {
+            "statusCode": 200,
+            "body": "sem dados"
+        }
+
+    leitura = preparar(leitura)
+
+    if leitura.empty:
+        logger.warning("Nenhuma linha válida após a limpeza")
+
+        return {
+            "statusCode": 200,
+            "body": "sem dados válidos"
+        }
+
+    logger.info(
+        "Data frame criado: %s linhas",
+        len(leitura)
+    )
+
+    empresas = buscar_empresas()
 
     try:
-        empresas = descobrir_quantidade()
-        print("Consulta no banco realizada")
-    except:
-         print("consulta no banco falhou") 
+        clima = buscar_clima(max(HORIZONTES))
+
+        logger.info(
+            "Clima obtido para %s dias",
+            len(clima)
+        )
+
+    except Exception:
+        logger.exception(
+            "Falha ao buscar clima; previsões seguem sem clima"
+        )
+
+        clima = None
+
+    agora = datetime.now()
+
+    carimbo = f"{agora:%Y-%m-%d}_{agora.hour}-{agora.minute}"
+
+    falhas = []
+
     for e in empresas:
-        jsonFinal = []
-        linhas = leitura.loc[leitura["Empresa ID"] == e["id"]]
-        leituraUnica = pandas.DataFrame(linhas)
-        ultimas = leituraUnica.sort_values('data/hora').groupby('uuid').tail(1)
-        for l in ultimas.index:
-            historico = leituraUnica[leituraUnica['uuid'] == leituraUnica['uuid'][l]]
-            horas = list(range(len(historico)))
 
-            predicao = []
-            for comp in ['ram', 'cpu', 'disco']:
-                y_vals = historico[comp].values
-                valor_pred, r_quadrado, inclinacao = None, None, None
-                if len(y_vals) >= 2:
-                    inclinacao, intercepto = np.polyfit(horas, y_vals, 1)
-                    r_quadrado = np.corrcoef(horas, y_vals)[0, 1] ** 2
-                    limite_max = historico[f'Valor maximo {comp.upper()}'].iloc[0]
-                    if inclinacao != 0:
-                        valor_pred = round((limite_max - intercepto) / inclinacao, 1)
-                        r_quadrado = round(r_quadrado, 3)
-                        inclinacao = round(inclinacao, 3)
-                    else:
-                        r_quadrado, inclinacao = None, None
-                predicao.append({comp.upper(): {'horas': valor_pred, 'r_quadrado': r_quadrado, 'inclinacao': inclinacao}})
+        df_emp = leitura[
+            leitura["empresa id"] == e["id"]
+        ]
 
-            json1 = {
-                'maquina': leituraUnica['maquina'][l],
-                'uuid': leituraUnica['uuid'][l],
-                'cpu': float(leituraUnica['cpu'][l]),
-                'ram': float(leituraUnica['ram'][l]),
-                'disco': float(leituraUnica['disco'][l]),
-                'rede': float(leituraUnica['rede'][l]),
-                'total_processos': int(leituraUnica['total_processos'][l]),
-                'data/hora': leituraUnica['data/hora'][l].strftime('%Y-%m-%d %H:%M:%S'),
-                'Valor maximo CPU': int(leituraUnica['Valor maximo CPU'][l]),
-                'Valor minimo CPU': int(leituraUnica['Valor minimo CPU'][l]),
-                'Valor maximo RAM': int(leituraUnica['Valor maximo RAM'][l]),
-                'Valor minimo RAM': int(leituraUnica['Valor minimo RAM'][l]),
-                'Valor maximo DISCO': int(leituraUnica['Valor maximo DISCO'][l]),
-                'Valor minimo DISCO': int(leituraUnica['Valor minimo DISCO'][l]),
-                'Valor maximo NET': int(leituraUnica['Valor maximo NET'][l]),
-                'Valor minimo NET': int(leituraUnica['Valor minimo NET'][l]),
-                'Empresa ID': int(leituraUnica['Empresa ID'][l]),
-                'predicao': predicao
-            }
-            jsonFinal.append(json1)
-            
-        data = datetime.now()    
-        dia = date.today()
-        with open(f'leitura_{dia}_{data.hour}-{data.minute}_{e["nome_fantasia"]}.json','w', encoding='cp1252') as f:
-                json.dump(jsonFinal,f,ensure_ascii=False, indent = 2 )      
-        s3_client.upload_file(f'./leitura_{dia}_{data.hour}-{data.minute}_{e["nome_fantasia"]}.json', BUCKET_NAME, f"client/leitura_{dia}_{data.hour}-{data.minute}_{e["nome_fantasia"]}.json")  
+        if df_emp.empty:
+            continue
 
-        print("Arquivo json criado com sucesso")        
-        arquivosJson = glob.glob("./*.json")
+        nome = re.sub(
+            r"[^\w\-]+",
+            "_",
+            e["nome_fantasia"]
+        )
 
-        for js in arquivosJson:
-                  if"lei" in js:
-                        os.remove(f"./{js}")
+        pasta = f"{PREFIXO_SAIDA}empresa_{e['id']}/"
 
-    arquivos = glob.glob("./*.csv")
-    
+        # JSON de leitura: objeto indexado por id_radar
+        try:
+            enviar_json(
+                f"{pasta}leitura_{carimbo}_{nome}.json",
+                montar_json_empresa(df_emp)
+            )
 
-    for a in arquivos:
-            if "comp" in a:
-                os.remove(f"./{a}")
-    
+        except Exception:
+            logger.exception(
+                "Falha no json de leitura da empresa id=%s",
+                e["id"]
+            )
 
-    print("-------Arquivo enviado para bucket no prefixo ouro------------")                     
-  except KeyboardInterrupt:
-       print("Código interrompido de forma brusca!")
+            falhas.append(int(e["id"]))
+            continue
 
-ouro()
+        # JSON de previsão: NumPy + ajuste climático
+        try:
+            enviar_json(
+                f"{pasta}previsao_{carimbo}_{nome}.json",
+                montar_previsao_empresa(df_emp, clima)
+            )
+
+        except Exception:
+            logger.exception(
+                "Falha na previsão NumPy da empresa id=%s",
+                e["id"]
+            )
+
+            falhas.append(int(e["id"]))
+
+    if falhas:
+        raise RuntimeError(
+            f"Falha ao processar empresas: {falhas}"
+        )
+
+    return {
+        "statusCode": 200,
+        "body": "ok"
+    }
