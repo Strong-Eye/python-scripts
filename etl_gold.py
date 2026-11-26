@@ -29,6 +29,18 @@ COMPONENTES_JSON = ["ram", "cpu", "disco"]
 
 STATUS_ZUMBI = {"zombie", "stopped"}
 
+# Teto das previsões dos componentes percentuais. A rede é medida em Mbps, então não entra.
+TETO_PERCENTUAL = 100
+COMPONENTES_PERCENTUAIS = {"cpu", "ram", "disco"}
+
+# Coluna do CSV da silver com o valor de alerta de cada componente (nomes já em minúsculas)
+COLUNA_ALERTA = {
+    "cpu": "valor alerta cpu",
+    "ram": "valor alerta ram",
+    "disco": "valor alerta disco",
+    "rede": "valor alerta net",
+}
+
 s3 = boto3.client("s3")
 
 
@@ -203,6 +215,7 @@ def contar_zumbis(processos):
 def _int(v):
     return None if pd.isna(v) else int(round(float(v)))
 
+
 def montar_registro(grupo):
     """Registro de um radar. O id_radar vira a chave do objeto em
     montar_json_empresa; o uuid fica aqui dentro como um campo comum."""
@@ -217,17 +230,17 @@ def montar_registro(grupo):
         "maquina": u.get("maquina"),
         "data/hora": u["data/hora"].strftime("%Y-%m-%d %H:%M:%S"),
 
-        "Valor maximo CPU": _int(u.get("valor maximo cpu")),
-        "Valor minimo CPU": _int(u.get("valor minimo cpu")),
+        "Valor alerta CPU": _int(u.get("valor alerta cpu")),
+        "Valor chamado CPU": _int(u.get("valor chamado cpu")),
 
-        "Valor maximo RAM": _int(u.get("valor maximo ram")),
-        "Valor minimo RAM": _int(u.get("valor minimo ram")),
+        "Valor alerta RAM": _int(u.get("valor alerta ram")),
+        "Valor chamado RAM": _int(u.get("valor chamado ram")),
 
-        "Valor maximo DISCO": _int(u.get("valor maximo disco")),
-        "Valor minimo DISCO": _int(u.get("valor minimo disco")),
+        "Valor alerta DISCO": _int(u.get("valor alerta disco")),
+        "Valor chamado DISCO": _int(u.get("valor chamado disco")),
 
-        "Valor maximo NET": _int(u.get("valor maximo net")),
-        "Valor minimo NET": _int(u.get("valor minimo net")),
+        "Valor alerta NET": _int(u.get("valor alerta net")),
+        "Valor chamado NET": _int(u.get("valor chamado net")),
 
         "Empresa ID": int(u["empresa id"]),
 
@@ -251,11 +264,18 @@ def montar_registro(grupo):
 
 
 def montar_json_empresa(df_empresa):
+    """Objeto com a lista de radares: {"dados": [{"id_radar": 12, ...}, {"id_radar": 13, ...}]}"""
     return {
-        str(int(id_radar)): montar_registro(grupo)
-        for id_radar, grupo in df_empresa.groupby("id_radar")
+        "dados": [
+            {"id_radar": int(id_radar), **montar_registro(grupo)}
+            for id_radar, grupo in df_empresa.groupby("id_radar")
+        ]
     }
 
+
+# ----------------------------------------------------------------------------
+# Clima
+# ----------------------------------------------------------------------------
 def buscar_clima(dias):
     import requests
 
@@ -334,6 +354,25 @@ def buscar_clima(dias):
 # ----------------------------------------------------------------------------
 # Previsão NumPy + clima
 # ----------------------------------------------------------------------------
+def valor_alerta_do_radar(df_radar, comp):
+    """Valor de alerta do componente para este radar (o mais recente do CSV da silver).
+    Devolve None se a coluna não existir ou estiver vazia."""
+    coluna = COLUNA_ALERTA.get(comp)
+
+    if coluna is None or coluna not in df_radar.columns:
+        return None
+
+    serie = pd.to_numeric(
+        df_radar.sort_values("data/hora")[coluna],
+        errors="coerce"
+    ).dropna()
+
+    if serie.empty:
+        return None
+
+    return round(float(serie.iloc[-1]), 2)
+
+
 def prever_numpy(df_radar, clima=None):
     passos = max(HORIZONTES)
 
@@ -397,8 +436,11 @@ def prever_numpy(df_radar, clima=None):
             # R² é indefinido quando todos os valores históricos são iguais.
             confiabilidade = None
 
+        valor_alerta = valor_alerta_do_radar(df, comp)
+
         resultado[comp] = {
-            "confiabilidade": confiabilidade
+            "confiabilidade": confiabilidade,
+            "valor_alerta": valor_alerta
         }
 
         dias = []
@@ -406,17 +448,22 @@ def prever_numpy(df_radar, clima=None):
         for i in range(passos):
             data = datas_futuras[i].strftime("%Y-%m-%d")
 
-            # Previsão baseada na tendência histórica.
-            previsao_base = (
-                inclinacao * (len(y) + i) + intercepto
-            )
-            previsao = previsao_base
+            # Previsão baseada na tendência histórica, nunca abaixo de 0
+            # e, nos componentes percentuais, nunca acima do teto (100).
+            previsao = max(float(inclinacao * (len(y) + i) + intercepto), 0.0)
 
+            if comp in COMPONENTES_PERCENTUAIS:
+                previsao = min(previsao, float(TETO_PERCENTUAL))
 
+            previsao = round(previsao, 2)
 
             item = {
                 "data": data,
-                "previsao": round(max(float(previsao), 0), 2)
+                "previsao": previsao,
+                # True se a previsão do dia ultrapassa o valor de alerta (None se o radar não tem alerta)
+                "estourou_alerta": (
+                    None if valor_alerta is None else bool(previsao > valor_alerta)
+                )
             }
 
             if clima and data in clima:
@@ -431,15 +478,15 @@ def prever_numpy(df_radar, clima=None):
 
 
 def montar_previsao_empresa(df_empresa, clima):
-    resultado = {}
+    """Objeto com a lista de radares: {"dados": [{"id_radar": 12, "uuid": ..., "cpu": {...}, ...}]}"""
+    radares = []
     for _, df_radar in df_empresa.groupby("id_radar"):
-        id_radar = int(df_radar["id_radar"].iloc[0])
-        uuid = df_radar["uuid"].iloc[0]
-        previsao = prever_numpy(df_radar, clima)
-        previsao["uuid"] = uuid
-        resultado[str(id_radar)] = previsao
-    return resultado
-
+        radares.append({
+            "id_radar": int(df_radar["id_radar"].iloc[0]),
+            "uuid": df_radar["uuid"].iloc[0],
+            **prever_numpy(df_radar, clima)
+        })
+    return {"dados": radares}
 
 
 # ----------------------------------------------------------------------------

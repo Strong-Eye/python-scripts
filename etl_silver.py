@@ -50,6 +50,13 @@ def ler_csv(corpo: bytes, chave: str):
     df.columns = [str(c).strip().lower() for c in df.columns]
     df = df.loc[:, ~df.columns.str.startswith("unnamed")]
 
+    # Colunas que a silver recalcula a partir do banco. Se o arquivo já veio enriquecido
+    # (por exemplo, uma saída da própria silver copiada para raw/), elas são descartadas
+    # aqui para não duplicar colunas no merge.
+    df = df.loc[:, ~df.columns.str.startswith(("valor alerta", "valor chamado"))]
+    df = df.drop(columns=["empresa id", "id_radar"], errors="ignore")
+    df = df.loc[:, ~df.columns.duplicated()]
+
     faltando = [c for c in COLUNAS_OBRIGATORIAS if c not in df.columns]
     if faltando:
         logger.warning("%s sem colunas %s (colunas: %s), ignorado",
@@ -119,7 +126,11 @@ def limpar(leitura):
 
 def buscar_parametros(uuids):
     """Uma única consulta para todos os radares.
-    Retorna (DataFrame de limites por uuid, dict {empresa_id: nome_fantasia})."""
+    Retorna (DataFrame de limites por uuid, dict {empresa_id: nome_fantasia}).
+
+    valor_alerta  -> limite que gera notificação (é com ele que se decide se passou do parâmetro)
+    valor_chamado -> limite que abre chamado direto no Jira
+    """
     if not uuids:
         return pd.DataFrame(), {}
 
@@ -131,8 +142,8 @@ def buscar_parametros(uuids):
             r.fk_empresa,
             e.nome_fantasia,
             p.fk_componente,
-            p.valor_maximo,
-            p.valor_minimo
+            p.valor_alerta,
+            p.valor_chamado
         FROM parametros p
         JOIN radares r ON p.fk_radar = r.id
         JOIN empresas e ON r.fk_empresa = e.id
@@ -171,17 +182,17 @@ def buscar_parametros(uuids):
             "uuid": uuid,
             "id_radar": params[0]["id_radar"],
 
-            "Valor maximo CPU": cpu["valor_maximo"],
-            "Valor minimo CPU": cpu["valor_minimo"],
+            "Valor alerta CPU": cpu["valor_alerta"],
+            "Valor chamado CPU": cpu["valor_chamado"],
 
-            "Valor maximo RAM": ram["valor_maximo"],
-            "Valor minimo RAM": ram["valor_minimo"],
+            "Valor alerta RAM": ram["valor_alerta"],
+            "Valor chamado RAM": ram["valor_chamado"],
 
-            "Valor maximo DISCO": disco["valor_maximo"],
-            "Valor minimo DISCO": disco["valor_minimo"],
+            "Valor alerta DISCO": disco["valor_alerta"],
+            "Valor chamado DISCO": disco["valor_chamado"],
 
-            "Valor maximo NET": net["valor_maximo"],
-            "Valor minimo NET": net["valor_minimo"],
+            "Valor alerta NET": net["valor_alerta"],
+            "Valor chamado NET": net["valor_chamado"],
 
             "Empresa ID": params[0]["fk_empresa"],
         })
